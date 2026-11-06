@@ -357,18 +357,77 @@ def push_feishu(webhook, title, checkin_line, buddy_line, overall_ok):
             return False, "重试 %d 次后仍异常：%s: %s" % (MAX_RETRY, type(e).__name__, e)
 
 
+# ---------------------------------------------------------------- 邮件
+
+def push_email(user, auth_code, mail_to, subject, checkin_line, buddy_line, overall_ok):
+    """通过 QQ 邮箱 SMTP 发送签到结果。返回 (ok, reason)。
+
+    Secret 说明：
+      QQ_SMTP_USER  QQ 邮箱地址（如 123456@qq.com）
+      QQ_SMTP_PASS  QQ 邮箱「授权码」，不是登录密码 —— 在 QQ 邮箱
+                    设置 → 账户 → POP3/IMAP/SMTP 服务 里开启后获得
+      MAIL_TO       收件地址
+
+    失败分类与飞书推送保持一致：认证类错误不重试（重试无用），
+    网络/瞬时异常按 MAX_RETRY 退避重试。
+    """
+    import smtplib
+    from email.header import Header
+    from email.mime.text import MIMEText
+    from email.utils import formataddr, formatdate
+
+    status = "成功" if overall_ok else "失败"
+    body = "\n".join([
+        "签到：%s" % checkin_line,
+        "猫猫旅行：%s" % buddy_line,
+        "",
+        "整体结论：%s" % ("成功（签到已达成）" if overall_ok else "失败（签到未达成）"),
+        "",
+        "—— 本邮件由 GitHub Actions 自动发送，请勿回复",
+    ])
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = Header(subject, "utf-8")
+    msg["From"] = formataddr((str(Header("WorkBuddy 签到", "utf-8")), user))
+    msg["To"] = mail_to
+    msg["Date"] = formatdate(localtime=True)
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=25) as s:
+                s.login(user, auth_code)
+                s.sendmail(user, [mail_to], msg.as_string())
+            log("  [邮件] 已发送到 %s（%s）" % (mail_to, status))
+            return True, ""
+        except smtplib.SMTPAuthenticationError:
+            return False, ("QQ 邮箱认证被拒：Secret QQ_SMTP_PASS 必须填「授权码」而不是登录密码。"
+                           "去 QQ 邮箱 设置 → 账户 → 开启 POP3/IMAP/SMTP 服务后获取 16 位授权码")
+        except Exception as e:
+            if attempt < MAX_RETRY:
+                log("  [邮件] 发送异常，退避后重试（%d/%d）：%s: %s"
+                    % (attempt, MAX_RETRY, type(e).__name__, e))
+                time.sleep(2.0 * attempt)
+                continue
+            return False, "重试 %d 次后仍失败：%s: %s" % (MAX_RETRY, type(e).__name__, e)
+
+
 # ---------------------------------------------------------------- 主流程
 
 def main():
     token = os.environ.get("WB_ACCESS_TOKEN")
     webhook = os.environ.get("FEISHU_WEBHOOK")
+    mail_user = os.environ.get("QQ_SMTP_USER")
+    mail_pass = os.environ.get("QQ_SMTP_PASS")
+    mail_to = os.environ.get("MAIL_TO")
     endpoint = os.environ.get("WB_ENDPOINT") or DEFAULT_ENDPOINT
 
     if not token:
         log("缺少环境变量 WB_ACCESS_TOKEN（请在本机运行 refresh_token.py 注入 GitHub Secret）")
         return 2
-    if not webhook:
-        log("缺少环境变量 FEISHU_WEBHOOK")
+    if not webhook and not (mail_user and mail_pass and mail_to):
+        log("未配置任何推送渠道（QQ_SMTP_USER / QQ_SMTP_PASS / MAIL_TO 或 FEISHU_WEBHOOK）")
 
     headers = {
         "Accept": "application/json",
@@ -395,8 +454,13 @@ def main():
     buddy_line = ("🐱 " + buddy.get("report", "")) if buddy.get("report") else "🐱 无结论"
 
     # 推送状态与业务结论分开呈现：失败原因可诊断，但不污染签到结论
-    push_ok, push_reason = None, "未配置（缺少 FEISHU_WEBHOOK，本次不推送）"
-    if webhook:
+    # 优先邮件（本仓库改造后的主渠道），未配置邮件时回落到飞书
+    push_ok, push_reason = None, "未配置推送渠道（QQ_SMTP_USER / QQ_SMTP_PASS / MAIL_TO）"
+    if mail_user and mail_pass and mail_to:
+        push_ok, push_reason = push_email(mail_user, mail_pass, mail_to,
+                                          "WorkBuddy 签到结果",
+                                          checkin_line, buddy_line, overall_ok)
+    elif webhook:
         push_ok, push_reason = push_feishu(webhook, "每日自动化", checkin_line, buddy_line, overall_ok)
 
     result = {
@@ -411,13 +475,13 @@ def main():
     result_file = os.environ.get("WB_RESULT_FILE")
     if result_file:
         try:
-            push_line = ("✅ 已推送到飞书" if push_ok
+            push_line = ("✅ 推送成功" if push_ok
                          else "❌ 推送失败：%s" % push_reason)
             with open(result_file, "w", encoding="utf-8") as f:
                 f.write("| 项目 | 结论 |\n| --- | --- |\n")
                 f.write("| 签到 | %s |\n" % checkin_line)
                 f.write("| 猫猫旅行 | %s |\n" % buddy_line)
-                f.write("| 飞书推送 | %s |\n" % push_line)
+                f.write("| 结果推送 | %s |\n" % push_line)
                 f.write("| 整体 | %s |\n" % ("成功（签到已达成）" if overall_ok else "失败（签到未达成）"))
         except OSError as e:
             log("结果文件写入失败：%s" % e)
