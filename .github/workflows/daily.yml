@@ -20,10 +20,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: wb-daily
-  cancel-in-progress: false
-
 jobs:
   daily:
     runs-on: ubuntu-latest
