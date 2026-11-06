@@ -392,24 +392,50 @@ def push_email(user, auth_code, mail_to, subject, checkin_line, buddy_line, over
     msg["To"] = mail_to
     msg["Date"] = formatdate(localtime=True)
 
+    def connect():
+        """按 465(SSL) -> 587(STARTTLS) 顺序尝试建连，返回已连接的会话。"""
+        last = None
+        for port, mode in ((465, "ssl"), (587, "starttls")):
+            try:
+                if mode == "ssl":
+                    s = smtplib.SMTP_SSL("smtp.qq.com", port, timeout=30)
+                else:
+                    s = smtplib.SMTP("smtp.qq.com", port, timeout=30)
+                    s.starttls()
+                log("  [邮件] 已连接 smtp.qq.com:%d (%s)" % (port, mode))
+                return s
+            except Exception as e:
+                last = e
+                log("  [邮件] 连接 %d 失败：%s: %s" % (port, type(e).__name__, e))
+        raise last
+
     attempt = 0
     while True:
         attempt += 1
         try:
-            with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=25) as s:
+            s = connect()
+            try:
                 s.login(user, auth_code)
                 s.sendmail(user, [mail_to], msg.as_string())
+            finally:
+                try:
+                    s.quit()
+                except Exception:
+                    pass
             log("  [邮件] 已发送到 %s（%s）" % (mail_to, status))
             return True, ""
         except smtplib.SMTPAuthenticationError:
             return False, ("QQ 邮箱认证被拒：Secret QQ_SMTP_PASS 必须填「授权码」而不是登录密码。"
                            "去 QQ 邮箱 设置 → 账户 → 开启 POP3/IMAP/SMTP 服务后获取 16 位授权码")
         except Exception as e:
-            if attempt < MAX_RETRY:
+            if attempt < MAX_RETRY and not isinstance(e, smtplib.SMTPServerDisconnected):
                 log("  [邮件] 发送异常，退避后重试（%d/%d）：%s: %s"
                     % (attempt, MAX_RETRY, type(e).__name__, e))
                 time.sleep(2.0 * attempt)
                 continue
+            if isinstance(e, smtplib.SMTPServerDisconnected):
+                return False, ("连接被服务器中断（通常是授权码被拒或登录过于频繁触发限频）：%s。"
+                               "请确认 QQ 邮箱已开启 IMAP/SMTP 服务，并重新生成授权码" % e)
             return False, "重试 %d 次后仍失败：%s: %s" % (MAX_RETRY, type(e).__name__, e)
 
 
