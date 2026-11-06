@@ -50,6 +50,9 @@ jobs:
         env:
           WB_ACCESS_TOKEN: ${{ secrets.WB_ACCESS_TOKEN }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          QQ_SMTP_USER: ${{ secrets.QQ_SMTP_USER }}
+          QQ_SMTP_PASS: ${{ secrets.QQ_SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
           WB_ENDPOINT: https://copilot.tencent.com
           WB_RESULT_FILE: ${{ runner.temp }}/wb_result.json
         run: |
